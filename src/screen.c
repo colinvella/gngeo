@@ -363,6 +363,12 @@ printf("AA Blitter %s effect %s\n",CF_STR(cf_get_item_by_name("blitter")),CF_STR
 
 int screen_resize(int w, int h) {
 	//nblitter = conf.nblitter;
+	/* Not every blitter implements resize -- the soft one has NULL in its
+	   table entry. Calling that jumps to address 0, which is what made any
+	   fullscreen toggle a segfault: the switch raises a window resize
+	   event before anything else gets a chance to run. */
+	if (blitter[nblitter].resize == NULL)
+		return GN_TRUE;
 	if ((*blitter[nblitter].resize) (w, h) == GN_FALSE)
 		return GN_FALSE;
 	return GN_TRUE;
