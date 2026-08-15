@@ -65,6 +65,10 @@ static SDL_Rect screen_rect = { 8,  0, 304, 224};
 static float screen_ratio = 4.0/3.0;
 static Uint32 current_window_width;
 static Uint32 current_window_height;
+/* size to restore when leaving fullscreen; conf.res_x/res_y get overwritten
+   with the fullscreen dimensions by the resize event, so they cannot serve */
+static int windowed_width;
+static int windowed_height;
 
 /// The pixel data to upload into the source GL texture
 static SDL_Surface *input_pixels;
@@ -729,17 +733,35 @@ blitter_glsl_close()
 void
 blitter_glsl_fullscreen()
 {
-	SDL_SetWindowFullscreen(window,
-				fullscreen?SDL_WINDOW_FULLSCREEN_DESKTOP:0);
-	if (fullscreen) {
-		SDL_DisplayMode mode;
-		SDL_GetWindowDisplayMode(window, &mode);
-		blitter_glsl_resize(mode.w, mode.h);
-	} else {
-		int w, h;
-		SDL_GetWindowSize(window, &w, &h);
-		blitter_glsl_resize(conf.res_x, conf.res_y);
+	int w, h;
+
+	/* Remember the windowed size before switching: the resize event that
+	   the switch generates overwrites conf.res_x/res_y with the fullscreen
+	   dimensions, so conf is no longer a way back. */
+	if (fullscreen)
+		SDL_GetWindowSize(window, &windowed_width, &windowed_height);
+
+	if (SDL_SetWindowFullscreen(window,
+				    fullscreen?SDL_WINDOW_FULLSCREEN_DESKTOP:0) != 0) {
+		printf("Could not toggle fullscreen: %s\n", SDL_GetError());
+		fullscreen ^= 1;	/* keep the flag in step with reality */
+		return;
 	}
+
+	if (!fullscreen && windowed_width > 0)
+		SDL_SetWindowSize(window, windowed_width, windowed_height);
+
+	/* Ask the window what it actually became. The previous code read
+	   SDL_GetWindowDisplayMode() without checking its return value, so a
+	   failure fed an uninitialised stack SDL_DisplayMode -- garbage width
+	   and height -- straight into the resize. */
+	SDL_GetWindowSize(window, &w, &h);
+	if (w <= 0 || h <= 0) {
+		printf("Fullscreen toggle gave a %dx%d window, ignoring\n", w, h);
+		return;
+	}
+
+	blitter_glsl_resize(w, h);
 }
 
 #endif

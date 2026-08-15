@@ -398,8 +398,13 @@ int handle_event(void) {
 			switch (event.window.event) {
 			case SDL_WINDOWEVENT_RESIZED:
 			case SDL_WINDOWEVENT_SIZE_CHANGED:
-				conf.res_x=event.window.data1;
-				conf.res_y=event.window.data2;
+				/* Going fullscreen raises this too. Recording the
+				   fullscreen dimensions as the configured window
+				   size loses the size to restore afterwards. */
+				if (!fullscreen) {
+					conf.res_x=event.window.data1;
+					conf.res_y=event.window.data2;
+				}
 				screen_resize(event.window.data1, event.window.data2);
 				break;
 			case SDL_WINDOWEVENT_CLOSE:
