@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include "SDL.h"
 #include "sound.h"
+#include "conf.h"
 #include "emu.h"
 #include "memory.h"
 #include "profiler.h"
@@ -44,6 +45,9 @@
 #endif
 
 SDL_AudioSpec * desired, *obtain;
+/* non-zero when playback was opened on a device named by the "audiodevice"
+   config item; zero means the legacy default-device API is in use */
+static SDL_AudioDeviceID audio_device = 0;
 
 #define MIXER_MAX_CHANNELS 16
 //#define CPU_FPS 60
@@ -104,6 +108,35 @@ void update_sdl_stream(void *userdata, Uint8 * stream, int len)
 	memcpy(stream, (Uint8 *) play_buffer, len);
 
 #endif
+#ifdef GNGEO_AUDIO_DEBUG
+	{
+		/* report the loudest sample seen, once per ~1s of audio */
+		static int dbg_calls = 0;
+		static int dbg_peak = 0;
+		static double dbg_sumsq = 0.0;
+		static long dbg_total = 0, dbg_nonzero = 0;
+		Sint16 *dbg_s = (Sint16 *)stream;
+		int dbg_n = len / 2;
+		for (int dbg_i = 0; dbg_i < dbg_n; dbg_i++) {
+			int v = dbg_s[dbg_i] < 0 ? -dbg_s[dbg_i] : dbg_s[dbg_i];
+			if (v > dbg_peak) dbg_peak = v;
+			dbg_sumsq += (double)v * v;
+			if (v) dbg_nonzero++;
+			dbg_total++;
+		}
+		if (++dbg_calls >= 40) {
+			double rms = dbg_total ? sqrt(dbg_sumsq / dbg_total) : 0.0;
+			fprintf(stderr, "[audio] peak=%5d rms=%8.1f nonzero=%.1f%% (%ld samples)\n",
+			        dbg_peak, rms, dbg_total ? 100.0 * dbg_nonzero / dbg_total : 0.0,
+			        dbg_total);
+			fflush(stderr);
+			dbg_calls = 0;
+			dbg_peak = 0;
+			dbg_sumsq = 0.0;
+			dbg_total = dbg_nonzero = 0;
+		}
+	}
+#endif
 	PROFILER_STOP(PROF_SOUND);
 
 }
@@ -135,7 +168,43 @@ int init_sdl_audio(void)
 	//desired->callback = NULL;
     desired->userdata = NULL;
     //SDL_OpenAudio(desired, NULL);
-    SDL_OpenAudio(desired, obtain);
+
+    /* "audiodevice" lets the user pin playback to a named endpoint instead of
+       following the Windows default, which per-app routing can send elsewhere.
+       Empty (the default) keeps the legacy behaviour. */
+    {
+        char *devname = CF_STR(cf_get_item_by_name("audiodevice"));
+        int ndev = SDL_GetNumAudioDevices(0);
+        printf("audio devices available: %d\n", ndev);
+        for (int i = 0; i < ndev; i++)
+            printf("  [%d] %s\n", i, SDL_GetAudioDeviceName(i, 0));
+
+        if (devname && devname[0]) {
+            /* allowed_changes=0 => SDL converts to our S16 spec rather than
+               changing it under us */
+            audio_device = SDL_OpenAudioDevice(devname, 0, desired, obtain, 0);
+            if (audio_device == 0)
+                printf("could not open audio device \"%s\": %s\n", devname, SDL_GetError());
+            else
+                printf("using audio device \"%s\"\n", devname);
+        }
+        if (audio_device == 0) {
+            /* obtained MUST be NULL here: with a non-NULL obtained spec, SDL is
+               free to hand back a different format (F32 on WASAPI), and the
+               mixer's S16 samples then get read as denormal floats == silence.
+               NULL makes SDL convert to the requested S16 instead. */
+            SDL_OpenAudio(desired, NULL);
+            *obtain = *desired;
+            printf("using the default audio device\n");
+        }
+    }
+#ifdef GNGEO_AUDIO_DEBUG
+    fprintf(stderr, "[audio] desired: freq=%d fmt=0x%04x ch=%d samples=%d\n",
+            desired->freq, desired->format, desired->channels, desired->samples);
+    fprintf(stderr, "[audio] obtained: freq=%d fmt=0x%04x ch=%d samples=%d size=%u\n",
+            obtain->freq, obtain->format, obtain->channels, obtain->samples, obtain->size);
+    fflush(stderr);
+#endif
     printf("Obtained sample rate: %d\n",obtain->freq);
     conf.sample_rate=obtain->freq;
     return GN_TRUE;
@@ -143,8 +212,14 @@ int init_sdl_audio(void)
 
 void close_sdl_audio(void) {
 	sound_initialize=GN_FALSE;
-    SDL_PauseAudio(1);
-    SDL_CloseAudio();
+    if (audio_device) {
+        SDL_PauseAudioDevice(audio_device, 1);
+        SDL_CloseAudioDevice(audio_device);
+        audio_device = 0;
+    } else {
+        SDL_PauseAudio(1);
+        SDL_CloseAudio();
+    }
     SDL_QuitSubSystem(SDL_INIT_AUDIO);
 	if (desired) free(desired);
 	desired = NULL;
@@ -154,7 +229,10 @@ void close_sdl_audio(void) {
 
 void pause_audio(int on) {
     // printf("PAUSE audio %d\n",on);
-    SDL_PauseAudio(on);
+    if (audio_device)
+        SDL_PauseAudioDevice(audio_device, on);
+    else
+        SDL_PauseAudio(on);
 }
 
 #else

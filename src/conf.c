@@ -44,7 +44,8 @@
 #include "gnutil.h"
 
 #ifndef GNGEORC
-#define GNGEORC "gngeorc"
+/* match the msys2 ngdevkit-gngeo package, which reads ~/.gngeo/ngdevkit-gngeorc */
+#define GNGEORC "ngdevkit-gngeorc"
 #endif
 
 /* 
@@ -419,6 +420,7 @@ void cf_init(void) {
 	cf_create_bool_item("interpolation", "Merge the last frame and the current", 'I', GN_FALSE);
 	cf_create_bool_item("raster", "Enable the raster interrupt", 'r', GN_FALSE);
 	cf_create_bool_item("sound", "Enable sound", 0, GN_TRUE);
+	cf_create_string_item("audiodevice", "Play sound on this named device instead of the system default", "NAME", 0, "");
 	cf_create_bool_item("showfps", "Show FPS at startup", 0, GN_FALSE);
 
 	cf_create_bool_item("sleepidle", "Sleep when idle", 0, GN_FALSE);
