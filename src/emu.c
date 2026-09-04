@@ -27,6 +27,7 @@
 #include <time.h>
 
 #include "emu.h"
+#include "control.h"
 #include "memory.h"
 #include "frame_skip.h"
 #include "pd4990a.h"
@@ -363,6 +364,8 @@ void main_loop(void) {
 			reset_event();
 		}
 
+		control_frame_begin();
+
 #if 0
 		while (SDL_PollEvent(&event)) {
 			switch (event.type) {
@@ -696,6 +699,8 @@ void main_loop(void) {
 			/* we are in debug mode -> we are just here for event handling */
 			neo_emu_done = 1;
 		}
+
+		control_frame_end();
 
 #ifdef ENABLE_PROFILER
 		profiler_show_stat();

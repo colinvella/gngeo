@@ -103,6 +103,7 @@
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
+#include "../control.h"
 #endif
 
 #include <stdio.h>
@@ -2169,6 +2170,8 @@ static void OPNB_ADPCMA_write(int r, int v) {
 					adpcma[c].adpcma_step = 0;
 					adpcma[c].adpcma_out = 0;
 					adpcma[c].flag = 1;
+					control_note_adpcma(c, adpcma[c].start,
+							    adpcma[c].end);
 
 					if (pcmbufA == NULL) {
 						/* Check ROM Mapped */
@@ -2345,6 +2348,8 @@ static void OPNB_ADPCMB_write(ADPCMB *adpcmb, int r, int v) {
 			adpcmb->adpcml = 0;
 			adpcmb->adpcmd = ADPCMB_DELTA_DEF;
 			adpcmb->now_data = 0;
+			control_note_adpcmb(adpcmb->start, adpcmb->end,
+					    (adpcmb->portstate & 0x10) ? 1 : 0);
 		}
 
 //		if (adpcmb->portstate & 0x20) /* do we access external memory? */

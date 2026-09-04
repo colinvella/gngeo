@@ -13,7 +13,7 @@ gngeo_SOURCES = pd4990a.c gngeo_icon.h sound.h video.c profiler.c \
                 conf.h transpack.h transpack.c gnutil.c gnutil.h \
                 menu.c menu.h roms.h roms.c mame_layer.h mame_layer.c \
                 neoboot.c event.h event.c stb_image.c stb_image.h \
-                stb_zlib.c stb_zlib.h
+                stb_zlib.c stb_zlib.h control.c control.h
 
 # Platform dependant source and lib
 if USE_STARSCREAM
@@ -83,6 +83,14 @@ endif
 
 if USE_OPENGL
   gngeo_LDADD += $(GL_LIBS)
+endif
+
+if USE_MSYS2
+  gngeo_LDADD += -lws2_32
+endif
+
+if USE_MINGW
+  gngeo_LDADD += -lws2_32
 endif
 
 EXTRA_DIST = c32.mac screen_i386.asm video_i386.asm video_i386.inc \

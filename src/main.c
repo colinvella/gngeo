@@ -31,6 +31,7 @@
 #include "video.h"
 #include "screen.h"
 #include "emu.h"
+#include "control.h"
 #include "sound.h"
 #include "messages.h"
 #include "memory.h"
@@ -146,8 +147,11 @@ int main(int argc, char *argv[])
 #else
 	    debug_loop();
 #endif
-    else
+    else {
+	    control_init();
 	    main_loop();
+	    control_shutdown();
+    }
 
     close_game();
 

@@ -23,6 +23,7 @@
 #include "emu.h"
 #include "video.h"
 #include "memory.h"
+#include "control.h"
 #include "pd4990a.h"
 #include "transpack.h"
 
@@ -658,6 +659,7 @@ void mem68k_store_z80_byte(Uint32 addr, Uint8 data) {
     if (addr == 0x320000) {
         sound_code = data & 0xff;
         pending_command = 1;
+        control_note_command(sound_code);
         //printf("B Pending command. Sound_code=%02x\n",sound_code);
         if (conf.sound) {
 #ifdef ENABLE_940T
@@ -689,6 +691,7 @@ void mem68k_store_z80_word(Uint32 addr, Uint16 data) {
     if (addr == 0x320000) {
         sound_code = data >> 8;
         pending_command = 1;
+        control_note_command(sound_code);
         //printf("W Pending command. Sound_code=%02x\n",sound_code);
         if (conf.sound) {
 #ifdef ENABLE_940T

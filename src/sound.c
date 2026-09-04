@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include "SDL.h"
 #include "sound.h"
+#include "control.h"
 #include "conf.h"
 #include "emu.h"
 #include "memory.h"
@@ -108,6 +109,8 @@ void update_sdl_stream(void *userdata, Uint8 * stream, int len)
 	memcpy(stream, (Uint8 *) play_buffer, len);
 
 #endif
+	control_audio_tap(stream, len);
+
 #ifdef GNGEO_AUDIO_DEBUG
 	{
 		/* report the loudest sample seen, once per ~1s of audio */
