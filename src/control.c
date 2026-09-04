@@ -44,6 +44,12 @@ typedef int SOCKET;
 
 static int enabled = 0;
 static SOCKET listen_sock = INVALID_SOCKET;
+/* The one connected client, so shutdown can say goodbye on it. A harness that
+   simply sees the connection reset cannot tell "somebody closed the window"
+   from "the emulator crashed", and those want opposite reactions -- the first
+   is the end of the session, the second is a bug to chase. So the emulator
+   says which it is on the way out. */
+static volatile SOCKET client_sock = INVALID_SOCKET;
 static SDL_Thread *listen_thread = NULL;
 static volatile int stopping = 0;
 
@@ -620,11 +626,12 @@ static void serve_client(SOCKET c) {
 	char reply[MAX_REPLY + 2];
 	int used = 0;
 
+	client_sock = c;
 	in[0] = 0;
 	for (;;) {
 		int n = recv(c, in + used, (int)sizeof(in) - used - 1, 0);
 		char *nl;
-		if (n <= 0) return;
+		if (n <= 0) { client_sock = INVALID_SOCKET; return; }
 		used += n;
 		in[used] = 0;
 
@@ -736,6 +743,14 @@ void control_init(void) {
 void control_shutdown(void) {
 	if (!enabled) return;
 	stopping = 1;
+	/* Tell the client the emulator is going, before the socket drops under
+	   it. Best effort and unacknowledged: if the window was closed the peer
+	   may already be gone, and there is nothing useful to do about that. */
+	if (client_sock != INVALID_SOCKET) {
+		static const char bye[] = "BYE emulator closing\n";
+		send_all(client_sock, bye, (int)sizeof(bye) - 1);
+		client_sock = INVALID_SOCKET;
+	}
 	if (listen_sock != INVALID_SOCKET) {
 		CLOSESOCK(listen_sock);
 		listen_sock = INVALID_SOCKET;

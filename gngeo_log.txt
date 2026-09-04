@@ -1,0 +1,12 @@
+Option blitter
+Option shaderpath
+Option shader
+Option scale
+Option joystick
+Option p1control
+Option p2control
+c=98
+flags blitter set on cmd line
+soft         : Software blitter
+opengl       : Opengl blitter
+glsl         : OpenGL shading language (GLSL) blitter
