@@ -36,6 +36,7 @@ typedef int SOCKET;
 #include "screen.h"
 #include "event.h"
 #include "conf.h"
+#include "sound.h"
 
 #define MAX_LINE 1024
 #define MAX_REPLY 8192
@@ -206,6 +207,24 @@ static volatile unsigned long wav_used = 0;
 static volatile int wav_active = 0;
 static char wav_path[512];
 
+/* Frame-locked WAV capture ("wav <path> sync"). The capture above records
+   whatever SDL's callback pulled, in real time -- under frame stepping that
+   is a chip running on the wall clock, so a recording made while a harness
+   steps the emulator has the sound in the wrong places and gaps between. This
+   one owns the mixer instead and renders exactly one frame of samples at the
+   end of every emulated frame, from the emulation thread, however long the
+   frame took in real time. It streams to the file as it goes, so it has no
+   length cap, and patches the header when it stops. The fractional sample is
+   carried over, or 5000 frames of 745 where 745.1 was due drifts by a third
+   of a second. */
+static FILE *sync_file = NULL;
+static char sync_path[512];
+static double sync_per_frame = 0.0;   /* sample frames per emulated frame */
+static double sync_owed = 0.0;
+static unsigned long sync_samples = 0; /* stereo sample frames written */
+static unsigned long sync_frames = 0;  /* emulated frames covered */
+static Sint16 sync_buf[2 * 8192];
+
 static void ring_put(AudEvent *ring, volatile unsigned *head,
 		     volatile unsigned tail, AudEvent *ev) {
 	unsigned h = *head;
@@ -271,18 +290,11 @@ void control_audio_tap(const void *stream, int bytes) {
 	}
 }
 
-/* Write what was captured as a 16-bit stereo WAV. Emulation thread. */
-static int wav_flush(void) {
-	FILE *f;
-	unsigned long data_bytes = wav_used * sizeof(Sint16);
+/* The 44-byte header of a 16-bit stereo PCM WAV holding data_bytes. */
+static void wav_header(unsigned char *hdr, unsigned long data_bytes) {
 	unsigned int rate = conf.sample_rate ? conf.sample_rate : 44100;
-	unsigned char hdr[44];
 	unsigned int u32;
 	unsigned short u16;
-
-	if (!wav_buf || wav_used == 0) return 0;
-	f = fopen(wav_path, "wb");
-	if (!f) return 0;
 
 #define PUT32(off, val) do { u32 = (unsigned int)(val); \
 	hdr[off] = u32 & 0xff; hdr[(off)+1] = (u32 >> 8) & 0xff; \
@@ -304,11 +316,78 @@ static int wav_flush(void) {
 	PUT32(40, data_bytes);
 #undef PUT32
 #undef PUT16
+}
 
+/* Write what was captured as a 16-bit stereo WAV. Emulation thread. */
+static int wav_flush(void) {
+	FILE *f;
+	unsigned long data_bytes = wav_used * sizeof(Sint16);
+	unsigned char hdr[44];
+
+	if (!wav_buf || wav_used == 0) return 0;
+	f = fopen(wav_path, "wb");
+	if (!f) return 0;
+	wav_header(hdr, data_bytes);
 	fwrite(hdr, 1, 44, f);
 	fwrite(wav_buf, 1, data_bytes, f);
 	fclose(f);
 	return 1;
+}
+
+/* One emulated frame of the frame-locked capture. Emulation thread, at the
+   end of the frame, once the Z80 and the 68000 have both run it. */
+static void sync_frame(void) {
+	int n;
+
+	sync_owed += sync_per_frame;
+	n = (int)sync_owed;
+	sync_owed -= n;
+	if (n > 8192) n = 8192;
+	sound_render(sync_buf, n);
+	fwrite(sync_buf, 4, n, sync_file);
+	sync_samples += n;
+	sync_frames++;
+	control_audio_tap(sync_buf, n * 4);   /* keeps "level" honest */
+}
+
+/* Start the frame-locked capture. Returns 0 and fills why on failure. */
+static int sync_start(const char *path, double fps, char *why, int whylen) {
+	unsigned char hdr[44];
+
+	if (!conf.sound) {
+		SDL_strlcpy(why, "ERR sound is off in this emulator", whylen);
+		return 0;
+	}
+	if (sync_file) {
+		SDL_strlcpy(why, "ERR a sync capture is already running", whylen);
+		return 0;
+	}
+	sync_file = fopen(path, "wb");
+	if (!sync_file) {
+		SDL_snprintf(why, whylen, "ERR cannot open %s", path);
+		return 0;
+	}
+	wav_header(hdr, 0);        /* sizes patched by sync_stop */
+	fwrite(hdr, 1, 44, sync_file);
+	SDL_strlcpy(sync_path, path, sizeof(sync_path));
+	sync_per_frame = (double)(conf.sample_rate ? conf.sample_rate : 44100) / fps;
+	sync_owed = 0.0;
+	sync_samples = sync_frames = 0;
+	sound_own_mixer(1);
+	return 1;
+}
+
+/* Stop it: give the mixer back and patch the header. */
+static void sync_stop(void) {
+	unsigned char hdr[44];
+
+	if (!sync_file) return;
+	sound_own_mixer(0);
+	wav_header(hdr, sync_samples * 4);
+	fseek(sync_file, 0, SEEK_SET);
+	fwrite(hdr, 1, 44, sync_file);
+	fclose(sync_file);
+	sync_file = NULL;
 }
 
 /* Drain both rings into the reply. Emulation thread. */
@@ -505,7 +584,23 @@ static void execute(char *line) {
 		lvl_samples = 0;
 
 	} else if (!SDL_strcasecmp(argv[0], "wav")) {
-		if (argc > 1 && !SDL_strcasecmp(argv[1], "stop")) {
+		if (argc > 1 && !SDL_strcasecmp(argv[1], "stop") && sync_file) {
+			unsigned long n = sync_samples, fr = sync_frames;
+			sync_stop();
+			SDL_snprintf(rep_line, MAX_REPLY, "OK %s %lu samples %lu frames",
+				     sync_path, n, fr);
+		} else if (argc > 2 && !SDL_strcasecmp(argv[2], "sync")) {
+			/* Frame-locked: one emulated frame of sound per emulated
+			   frame, whatever the wall clock does. fps is the rate the
+			   frames are meant to be played back at -- the Neo Geo's own
+			   59.185606 unless a video is being cut to something else. */
+			double fps = (argc > 3) ? SDL_atof(argv[3]) : 59.185606;
+			if (fps < 1.0 || fps > 1000.0) fps = 59.185606;
+			if (sync_start(argv[1], fps, rep_line, MAX_REPLY))
+				SDL_snprintf(rep_line, MAX_REPLY,
+					     "OK sync capture to %s: %d Hz, %.3f samples a frame",
+					     sync_path, conf.sample_rate, sync_per_frame);
+		} else if (argc > 1 && !SDL_strcasecmp(argv[1], "stop")) {
 			wav_active = 0;
 			if (wav_flush())
 				SDL_snprintf(rep_line, MAX_REPLY, "OK %s %lu samples",
@@ -513,7 +608,7 @@ static void execute(char *line) {
 			else
 				SDL_strlcpy(rep_line, "ERR nothing captured", MAX_REPLY);
 		} else if (argc < 2) {
-			SDL_strlcpy(rep_line, "ERR usage: wav <path> [seconds] | wav stop", MAX_REPLY);
+			SDL_strlcpy(rep_line, "ERR usage: wav <path> [seconds] | wav <path> sync [fps] | wav stop", MAX_REPLY);
 		} else {
 			int secs = (argc > 2) ? atoi(argv[2]) : 5;
 			unsigned int rate = conf.sample_rate ? conf.sample_rate : 44100;
@@ -587,6 +682,9 @@ void control_frame_begin(void) {
 
 void control_frame_end(void) {
 	if (!enabled) return;
+	/* Before the requests: a sync capture asked for at this gate starts
+	   with the next frame, the same as one asked for at the top of it. */
+	if (sync_file) sync_frame();
 	SDL_LockMutex(lock);
 	frame_count++;
 	/* Aged here rather than before the frame, so a button asked for over
@@ -743,6 +841,9 @@ void control_init(void) {
 void control_shutdown(void) {
 	if (!enabled) return;
 	stopping = 1;
+	/* A capture still running when the window closes is still a file
+	   somebody wanted: finish its header rather than leave it unreadable. */
+	sync_stop();
 	/* Tell the client the emulator is going, before the socket drops under
 	   it. Best effort and unacknowledged: if the window was closed the peer
 	   may already be gone, and there is nothing useful to do about that. */

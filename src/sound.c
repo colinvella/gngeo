@@ -66,6 +66,28 @@ Uint16 play_buffer[BUFFER_LEN];
 //#define NB_SAMPLES 512
 #endif
 
+/* Set while the control socket's frame-locked WAV capture owns the mixer.
+   The YM2610 is rendered on demand, and normally SDL's audio thread is what
+   demands it, in real time -- which under frame stepping means the chip runs
+   on the wall clock rather than the emulated one. So the capture takes it
+   over: the emulation thread renders exactly one frame's worth of samples at
+   the end of every frame, and the callback plays silence meanwhile rather
+   than advance the same chip a second time. */
+static volatile int mixer_owned = 0;
+
+/* Render `frames` stereo sample frames into out. Only the owner of the mixer
+   may call it: the emulation thread, while sound_own_mixer(1) holds. */
+void sound_render(Sint16 *out, int frames)
+{
+	while (frames > 0) {
+		int n = frames > 4096 ? 4096 : frames;
+		YM2610Update_stream(n);
+		memcpy(out, play_buffer, n * 4);
+		out += n * 2;
+		frames -= n;
+	}
+}
+
 #ifndef USE_OSS
 
 void update_sdl_stream(void *userdata, Uint8 * stream, int len)
@@ -76,6 +98,11 @@ void update_sdl_stream(void *userdata, Uint8 * stream, int len)
 
 	PROFILER_START(PROF_SOUND);
 	//streamupdate(len);
+	if (mixer_owned) {
+		memset(stream, 0, len);
+		PROFILER_STOP(PROF_SOUND);
+		return;
+	}
 	
 #ifdef ENABLE_940T
 	if (shared_ctl->buf_pos >= play_buffer_pos && 
@@ -230,6 +257,18 @@ void close_sdl_audio(void) {
 	obtain = NULL;
 }
 
+/* Hand the mixer to the emulation thread (on) or back to SDL (off). Taken
+   under the device lock, so the callback is never part way through a render
+   when it changes hands. */
+void sound_own_mixer(int on)
+{
+    if (audio_device) SDL_LockAudioDevice(audio_device);
+    else SDL_LockAudio();
+    mixer_owned = on;
+    if (audio_device) SDL_UnlockAudioDevice(audio_device);
+    else SDL_UnlockAudio();
+}
+
 void pause_audio(int on) {
     // printf("PAUSE audio %d\n",on);
     if (audio_device)
@@ -250,13 +289,17 @@ void *fill_audio_data(void *ptr) {
 
     while(1) {
 
-        if (!paused) {
+        if (!paused && !mixer_owned) {
             YM2610Update_stream(buflen/4);
             write(dev_dsp,play_buffer,buflen);
         }
             
     }
 }
+void sound_own_mixer(int on) {
+    mixer_owned = on;
+}
+
 void pause_audio(int on) {
     static init=0;
     if (init==0) {

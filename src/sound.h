@@ -28,5 +28,7 @@ extern SDL_AudioSpec * desired, *obtain;
 int init_sdl_audio(void);
 void close_sdl_audio(void);
 void pause_audio(int on);
+void sound_own_mixer(int on);
+void sound_render(Sint16 *out, int frames);
 
 #endif
