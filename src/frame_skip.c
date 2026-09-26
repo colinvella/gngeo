@@ -29,6 +29,7 @@
 #include "emu.h"
 #include "conf.h"
 #include "gnutil.h"
+#include "control.h"
 
 #ifndef uclock_t
 #define uclock_t Uint32
@@ -101,6 +102,14 @@ int frame_skip(int init) {
 	static int skpFrm = 0;
 	static int count = 0;
 	static int moy = 60;
+
+	/* Every frame drawn, and none waited for, while the control socket is
+	   stepping: the client decides the pace, and the clock restarts when
+	   the emulator is let run free again. */
+	if (control_stepping()) {
+		reset_frame_skip();
+		return 0;
+	}
 
 	if (init_frame_skip) {
 		init_frame_skip = 0;

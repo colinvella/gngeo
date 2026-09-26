@@ -229,7 +229,7 @@ static inline int neo_interrupt(void) {
 		fc++;
 	}
 
-	skip_this_frame = skip_next_frame;
+	skip_this_frame = skip_next_frame && !control_stepping();
 	skip_next_frame = frame_skip(0);
 
 	if (!skip_this_frame) {
@@ -278,7 +278,7 @@ static inline void update_screen(void) {
 	}
 	fc++;
 
-	skip_this_frame = skip_next_frame;
+	skip_this_frame = skip_next_frame && !control_stepping();
 	skip_next_frame = frame_skip(0);
 }
 

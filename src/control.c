@@ -675,6 +675,10 @@ static void service_locked(void) {
 
 /* --------------------------------------------------------------- the gate */
 
+int control_stepping(void) {
+	return enabled && frames_left >= 0;
+}
+
 void control_frame_begin(void) {
 	if (!enabled) return;
 

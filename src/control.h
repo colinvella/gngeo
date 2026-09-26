@@ -21,6 +21,12 @@ void control_frame_end(void);
 
 void control_shutdown(void);
 
+/* True while a client is stepping frames -- paused or running a counted
+   step -- rather than letting the emulator run free. Frame skipping reads
+   it: a stepped run is as slow as its client, and against the wall clock
+   that looks like falling behind, so frames would go undrawn. */
+int control_stepping(void);
+
 /* ------------------------------------------------------------------ audio
  *
  * Three different questions, so three different taps:
