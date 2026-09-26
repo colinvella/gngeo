@@ -626,10 +626,16 @@ blitter_glsl_resize(int w, int h)
 	return GN_TRUE;
 }
 
-static void render_pass(int orig_width, int orig_height,
-                        GLuint src_texture, int src_width, int src_height,
-                        GLuint dst_framebuffer, int dst_width, int dst_height,
-                        GLuint program)
+/* `last` picks the texel coordinates the window gets, which flip the
+   picture upright; the passes before it keep the FBO orientation. It is
+   separate from the destination so the grab below can draw the last pass
+   into a framebuffer of its own and still get exactly the window's picture
+   -- a scanline shader keyed on gl_FragCoord would otherwise come out with
+   its phase flipped. */
+static void render_pass_ex(int orig_width, int orig_height,
+                           GLuint src_texture, int src_width, int src_height,
+                           GLuint dst_framebuffer, int dst_width, int dst_height,
+                           GLuint program, int last)
 {
 	glBindTexture(GL_TEXTURE_2D, src_texture);
 	glBindFramebuffer(GL_FRAMEBUFFER, dst_framebuffer);
@@ -661,7 +667,7 @@ static void render_pass(int orig_width, int orig_height,
 	glVertexAttribPointer(l_VertexCoord, 2, GL_FLOAT, GL_FALSE, 0, 0);
 	glEnableVertexAttribArray(l_VertexCoord);
 
-	glBindBuffer(GL_ARRAY_BUFFER, dst_framebuffer!=0?screen_buffer:tex_buffer);
+	glBindBuffer(GL_ARRAY_BUFFER, last?tex_buffer:screen_buffer);
 	glVertexAttribPointer(l_TexCoord, 2, GL_FLOAT, GL_FALSE, 0, 0);
 	glEnableVertexAttribArray(l_TexCoord);
 
@@ -676,10 +682,18 @@ static void render_pass(int orig_width, int orig_height,
 	glDrawArrays(GL_TRIANGLES, 0, 6);
 }
 
-void
-blitter_glsl_update()
+static void render_pass(int orig_width, int orig_height,
+                        GLuint src_texture, int src_width, int src_height,
+                        GLuint dst_framebuffer, int dst_width, int dst_height,
+                        GLuint program)
 {
-	int i;
+	render_pass_ex(orig_width, orig_height, src_texture, src_width, src_height,
+		       dst_framebuffer, dst_width, dst_height, program,
+		       dst_framebuffer == 0);
+}
+
+static void upload_frame(void)
+{
 	// GnGeo renders graphics in a big internal 2D buffer. Pixels are
 	// written in the "visible area", a 320x224 sub-rect with a
 	// (16,16) offset from the start of the internal buffer.
@@ -694,13 +708,6 @@ blitter_glsl_update()
 	viewport_rect.y += visible_area.y;
 	SDL_BlitSurface(buffer, &viewport_rect, input_pixels, NULL);
 
-	if (clear_after_resize>0) {
-		glBindFramebuffer(GL_FRAMEBUFFER, 0);
-		glClearColor(0.0, 0.0, 0.0, 1.0);
-		glClear(GL_COLOR_BUFFER_BIT);
-		clear_after_resize--;
-	}
-
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, input_tex);
 #ifndef RGB24_PIXELS
@@ -710,6 +717,21 @@ blitter_glsl_update()
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, screen_rect.w, screen_rect.h,
 		     0, GL_BGRA, GL_UNSIGNED_BYTE, input_pixels->pixels);
 #endif
+}
+
+void
+blitter_glsl_update()
+{
+	int i;
+
+	upload_frame();
+
+	if (clear_after_resize>0) {
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glClearColor(0.0, 0.0, 0.0, 1.0);
+		glClear(GL_COLOR_BUFFER_BIT);
+		clear_after_resize--;
+	}
 
 	// render: TEX -> (pass1_prog) -> FBO -> ... -> (pass2_prog) -> OUTPUT
 	for (i=0; i<nb_passes; i++) {
@@ -721,6 +743,83 @@ blitter_glsl_update()
 	}
 
 	SDL_GL_SwapWindow(window);
+}
+
+/* The picture the window shows, shader and all, saved as a BMP: the frame
+   in `buffer` is uploaded again and run through every pass, the last one
+   into a framebuffer of our own rather than the window's, then read back.
+   Offscreen so that a window behind another one, or off the desktop, still
+   gives the whole picture -- the default framebuffer's pixels are only
+   defined where the window is actually visible. Sized as the window's
+   viewport is, since a pass scaled to the viewport is drawn at that size.
+   Nothing is swapped, so the window is not disturbed. */
+static GLuint grab_tex, grab_fbo;
+static int grab_w, grab_h;
+
+int
+blitter_glsl_grab(const char *path)
+{
+	pass_t last;
+	int i, w, h, row, rc;
+	SDL_Surface *out;
+	Uint8 *pixels;
+
+	if (window == NULL || nb_passes == 0) return 0;
+	last = &pipeline[nb_passes-1];
+	w = last->dst_width;
+	h = last->dst_height;
+	if (w <= 0 || h <= 0) return 0;
+
+	if (grab_fbo == 0)
+		create_pass_framebuffer(w, h, &grab_tex, &grab_fbo);
+	if (w != grab_w || h != grab_h) {
+		glBindTexture(GL_TEXTURE_2D, grab_tex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
+			     GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+		grab_w = w;
+		grab_h = h;
+	}
+
+	upload_frame();
+	for (i=0; i<nb_passes; i++) {
+		pass_t p = &pipeline[i];
+		int final = (i == nb_passes-1);
+		render_pass_ex(screen_rect.w, screen_rect.h,
+			       p->src_texture, p->src_width, p->src_height,
+			       final ? grab_fbo : p->dst_framebuffer,
+			       p->dst_width, p->dst_height,
+			       p->program, final);
+	}
+
+	pixels = malloc((size_t)w * h * 4);
+	out = SDL_CreateRGBSurface(SDL_SWSURFACE, w, h, 24,
+				   0x0000FF, 0x00FF00, 0xFF0000, 0);
+	if (!pixels || !out) {
+		free(pixels);
+		if (out) SDL_FreeSurface(out);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		return 0;
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, grab_fbo);
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	/* GL's first row is the bottom one. */
+	for (row = 0; row < h; row++) {
+		Uint8 *src = pixels + (size_t)(h - 1 - row) * w * 4;
+		Uint8 *dst = (Uint8 *)out->pixels + (size_t)row * out->pitch;
+		int x;
+		for (x = 0; x < w; x++) {
+			dst[x*3+0] = src[x*4+0];
+			dst[x*3+1] = src[x*4+1];
+			dst[x*3+2] = src[x*4+2];
+		}
+	}
+	free(pixels);
+	rc = (SDL_SaveBMP(out, path) == 0);
+	SDL_FreeSurface(out);
+	return rc;
 }
 
 void

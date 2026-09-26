@@ -38,6 +38,7 @@ int blitter_glsl_resize(int w, int h);
 void blitter_glsl_update();
 void blitter_glsl_fullscreen();
 void blitter_glsl_close();
+int blitter_glsl_grab(const char *path);
 
 /* Overlay blitter */
 int blitter_overlay_init();

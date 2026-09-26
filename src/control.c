@@ -37,6 +37,7 @@ typedef int SOCKET;
 #include "event.h"
 #include "conf.h"
 #include "sound.h"
+#include "blitter.h"
 
 #define MAX_LINE 1024
 #define MAX_REPLY 8192
@@ -167,6 +168,17 @@ static int grab_screen(const char *path) {
 	rc = (SDL_SaveBMP(shoot, path) == 0);
 	SDL_FreeSurface(shoot);
 	return rc;
+}
+
+/* The same frame as the window shows it, through the GLSL blitter's shader
+   passes -- the CRT scanlines and all. Only that blitter has passes to run:
+   1 on success, 0 on a failed grab, -1 when some other blitter is up. */
+static int grab_window(const char *path) {
+#if (defined(HAVE_GL_GL_H) || defined(HAVE_OPENGL_GL_H)) && defined(USE_GLSL)
+	if (blitter[nblitter].update == blitter_glsl_update)
+		return blitter_glsl_grab(path);
+#endif
+	return -1;
 }
 
 
@@ -500,10 +512,19 @@ static void execute(char *line) {
 			     memory.intern_start, memory.intern_coin);
 
 	} else if (!SDL_strcasecmp(argv[0], "shot")) {
-		if (argc < 2)
-			SDL_strlcpy(rep_line, "ERR usage: shot <path>", MAX_REPLY);
-		else if (grab_screen(argv[1]))
+		/* shot <path>         the framebuffer, 320x224, as the game drew it
+		   shot <path> shader  the window's picture, through the shader */
+		int shader = argc > 2 && !SDL_strcasecmp(argv[2], "shader");
+		int rc;
+		if (argc < 2 || (argc > 2 && !shader))
+			SDL_strlcpy(rep_line, "ERR usage: shot <path> [shader]",
+				    MAX_REPLY);
+		else if ((rc = shader ? grab_window(argv[1])
+				      : grab_screen(argv[1])) > 0)
 			SDL_snprintf(rep_line, MAX_REPLY, "OK %s", argv[1]);
+		else if (rc < 0)
+			SDL_strlcpy(rep_line, "ERR no shader: the emulator is "
+				    "not running the glsl blitter", MAX_REPLY);
 		else
 			SDL_strlcpy(rep_line, "ERR screenshot failed", MAX_REPLY);
 
