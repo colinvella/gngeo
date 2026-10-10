@@ -1,8 +1,11 @@
 /*
  * control.c -- remote control socket for automated testing.
  *
- * A listener thread accepts one client at a time and speaks a line protocol.
- * It never touches emulator state itself: a command is parked in a request
+ * A listener thread accepts clients -- up to MAX_CLIENTS at once, each on a
+ * thread of its own -- and speaks a line protocol. Several at once is so a
+ * watcher (the stage editor's Performance tab, reading RAM) can sit beside
+ * whatever is driving the pad. Requests from all of them are serialised, one
+ * in flight at a time. It never touches emulator state itself: a command is parked in a request
  * slot and serviced by the emulation thread from control_frame_begin(), which
  * is also where pausing and frame stepping happen. So every reply is ordered
  * against a frame boundary, and a screenshot or a RAM read always describes a
@@ -12,6 +15,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
 #ifdef _WIN32
@@ -41,17 +45,22 @@ typedef int SOCKET;
 
 #define MAX_LINE 1024
 #define MAX_REPLY 8192
+#define MAX_CLIENTS 4
 
 /* ------------------------------------------------------------------ state */
 
 static int enabled = 0;
 static SOCKET listen_sock = INVALID_SOCKET;
-/* The one connected client, so shutdown can say goodbye on it. A harness that
+/* The connected clients, so shutdown can say goodbye on them. A harness that
    simply sees the connection reset cannot tell "somebody closed the window"
    from "the emulator crashed", and those want opposite reactions -- the first
    is the end of the session, the second is a bug to chase. So the emulator
    says which it is on the way out. */
-static volatile SOCKET client_sock = INVALID_SOCKET;
+static volatile SOCKET client_sock[MAX_CLIENTS];
+static SDL_mutex *clients_lock = NULL;
+/* One request in flight at a time, whichever client sent it: the request slot
+   below holds exactly one. */
+static SDL_mutex *serial = NULL;
 static SDL_Thread *listen_thread = NULL;
 static volatile int stopping = 0;
 
@@ -733,6 +742,7 @@ static int send_all(SOCKET s, const char *buf, int len) {
 
 /* Post a line to the emulation thread and wait for its reply. */
 static void dispatch(const char *line, char *out, int outlen) {
+	SDL_LockMutex(serial);
 	SDL_LockMutex(lock);
 	SDL_strlcpy(req_line, line, MAX_LINE);
 	rep_ready = 0;
@@ -742,6 +752,7 @@ static void dispatch(const char *line, char *out, int outlen) {
 	SDL_strlcpy(out, rep_ready ? rep_line : "ERR emulator not responding", outlen);
 	rep_ready = 0;
 	SDL_UnlockMutex(lock);
+	SDL_UnlockMutex(serial);
 }
 
 static void serve_client(SOCKET c) {
@@ -749,12 +760,11 @@ static void serve_client(SOCKET c) {
 	char reply[MAX_REPLY + 2];
 	int used = 0;
 
-	client_sock = c;
 	in[0] = 0;
 	for (;;) {
 		int n = recv(c, in + used, (int)sizeof(in) - used - 1, 0);
 		char *nl;
-		if (n <= 0) { client_sock = INVALID_SOCKET; return; }
+		if (n <= 0) return;
 		used += n;
 		in[used] = 0;
 
@@ -783,17 +793,52 @@ static void serve_client(SOCKET c) {
 	}
 }
 
+/* A client's own thread: serve it until it goes, then free its slot. */
+static int client_thread(void *arg) {
+	int slot = (int)(intptr_t)arg;
+	SOCKET c = client_sock[slot];
+	serve_client(c);
+	SDL_LockMutex(clients_lock);
+	if (client_sock[slot] == c) {
+		client_sock[slot] = INVALID_SOCKET;
+		CLOSESOCK(c);
+	}
+	SDL_UnlockMutex(clients_lock);
+	return 0;
+}
+
 static int listener(void *unused) {
 	(void)unused;
 	while (!stopping) {
+		int slot;
+		SDL_Thread *t;
 		SOCKET c = accept(listen_sock, NULL, NULL);
 		if (c == INVALID_SOCKET) {
 			if (stopping) break;
 			SDL_Delay(50);
 			continue;
 		}
-		serve_client(c);
-		CLOSESOCK(c);
+		SDL_LockMutex(clients_lock);
+		for (slot = 0; slot < MAX_CLIENTS; slot++)
+			if (client_sock[slot] == INVALID_SOCKET) break;
+		if (slot < MAX_CLIENTS) client_sock[slot] = c;
+		SDL_UnlockMutex(clients_lock);
+		if (slot == MAX_CLIENTS) {
+			static const char busy[] = "ERR busy: too many clients\n";
+			send_all(c, busy, (int)sizeof(busy) - 1);
+			CLOSESOCK(c);
+			continue;
+		}
+		t = SDL_CreateThread(client_thread, "gngeo_client",
+				     (void *)(intptr_t)slot);
+		if (t) {
+			SDL_DetachThread(t);
+		} else {
+			SDL_LockMutex(clients_lock);
+			client_sock[slot] = INVALID_SOCKET;
+			SDL_UnlockMutex(clients_lock);
+			CLOSESOCK(c);
+		}
 	}
 	return 0;
 }
@@ -837,7 +882,7 @@ void control_init(void) {
 	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); /* local only */
 
 	if (bind(listen_sock, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
-	    listen(listen_sock, 1) != 0) {
+	    listen(listen_sock, MAX_CLIENTS) != 0) {
 		printf("control: cannot listen on port %d, disabled\n", port);
 		CLOSESOCK(listen_sock);
 		listen_sock = INVALID_SOCKET;
@@ -846,6 +891,9 @@ void control_init(void) {
 
 	lock = SDL_CreateMutex();
 	req_done = SDL_CreateCond();
+	serial = SDL_CreateMutex();
+	clients_lock = SDL_CreateMutex();
+	for (p = 0; p < MAX_CLIENTS; p++) client_sock[p] = INVALID_SOCKET;
 
 	for (p = 0; p < 2; p++)
 		for (b = 0; b < GN_MAX_KEY; b++) {
@@ -872,10 +920,14 @@ void control_shutdown(void) {
 	/* Tell the client the emulator is going, before the socket drops under
 	   it. Best effort and unacknowledged: if the window was closed the peer
 	   may already be gone, and there is nothing useful to do about that. */
-	if (client_sock != INVALID_SOCKET) {
+	{
 		static const char bye[] = "BYE emulator closing\n";
-		send_all(client_sock, bye, (int)sizeof(bye) - 1);
-		client_sock = INVALID_SOCKET;
+		int i;
+		SDL_LockMutex(clients_lock);
+		for (i = 0; i < MAX_CLIENTS; i++)
+			if (client_sock[i] != INVALID_SOCKET)
+				send_all(client_sock[i], bye, (int)sizeof(bye) - 1);
+		SDL_UnlockMutex(clients_lock);
 	}
 	if (listen_sock != INVALID_SOCKET) {
 		CLOSESOCK(listen_sock);
