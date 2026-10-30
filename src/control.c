@@ -35,6 +35,7 @@ typedef int SOCKET;
 #include <SDL.h>
 
 #include "control.h"
+#include "sprite-demand.h"
 #include "emu.h"
 #include "memory.h"
 #include "screen.h"
@@ -75,6 +76,28 @@ static volatile int rep_ready = 0;
 /* Frame gating. frames_left < 0 means free running. */
 static volatile int frames_left = -1;
 static unsigned long frame_count = 0;
+#define SPRITE_HISTORY 64
+static struct { unsigned long frame; struct sprite_demand demand; } sprite_history[SPRITE_HISTORY];
+static unsigned sprite_head, sprite_count;
+static void sprite_sample(void) {
+    unsigned short scb3[448];
+    unsigned i;
+    for (i = 0; i < 448; ++i) scb3[i] = READ_WORD(memory.vid.ram + 0x10400 + i * 2);
+    sprite_history[sprite_head].frame = frame_count;
+    sprite_history[sprite_head].demand = sprite_demand_measure(scb3);
+    sprite_head = (sprite_head + 1) % SPRITE_HISTORY;
+    if (sprite_count < SPRITE_HISTORY) ++sprite_count;
+}
+static void sprite_report(void) {
+    unsigned n;
+    int used = SDL_snprintf(rep_line, MAX_REPLY, "OK v1");
+    for (n = 0; n < sprite_count; ++n) {
+        unsigned slot = (sprite_head + SPRITE_HISTORY - sprite_count + n) % SPRITE_HISTORY;
+        struct sprite_demand *d = &sprite_history[slot].demand;
+        used += SDL_snprintf(rep_line + used, MAX_REPLY - used, " %lu:%u:%u:%u:%u",
+            sprite_history[slot].frame, d->total, d->peak, d->line, d->beyond);
+    }
+}
 
 /* Pad overrides. Held state, plus a per-button countdown for timed taps. */
 static Uint8 ctl_held[2][GN_MAX_KEY];
@@ -537,6 +560,9 @@ static void execute(char *line) {
 		else
 			SDL_strlcpy(rep_line, "ERR screenshot failed", MAX_REPLY);
 
+	} else if (!SDL_strcasecmp(argv[0], "sprites")) {
+        sprite_report();
+
 	} else if (!SDL_strcasecmp(argv[0], "peek")) {
 		/* 68000 work RAM is 0x100000-0x10FFFF; the low 16 bits are
 		   taken, so either form of the address works. READ_BYTE_ROM
@@ -721,6 +747,7 @@ void control_frame_end(void) {
 	if (sync_file) sync_frame();
 	SDL_LockMutex(lock);
 	frame_count++;
+    sprite_sample();
 	/* Aged here rather than before the frame, so a button asked for over
 	   N frames is actually down for N of them. */
 	tick_pad();

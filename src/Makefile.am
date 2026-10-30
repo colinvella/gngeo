@@ -13,7 +13,7 @@ gngeo_SOURCES = pd4990a.c gngeo_icon.h sound.h video.c profiler.c \
                 conf.h transpack.h transpack.c gnutil.c gnutil.h \
                 menu.c menu.h roms.h roms.c mame_layer.h mame_layer.c \
                 neoboot.c event.h event.c stb_image.c stb_image.h \
-                stb_zlib.c stb_zlib.h control.c control.h
+                stb_zlib.c stb_zlib.h control.c control.h sprite-demand.h
 
 # Platform dependant source and lib
 if USE_STARSCREAM
